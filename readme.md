@@ -16,9 +16,24 @@ And of course, if your client does any JWT checks or uses the claims, then this 
 
 Just run the docker container as a single instance. Token cache is not shared, so don't create multiple instances.
 
-Create an environment variable `KC_UPSTREAM` and set it to the base url of your keycloak instance, e.g. `http://keycloak.identity.local`. Do not include path like `/auth`.
+Create an environment variable `KC_UPSTREAM` and set it to the base url of your keycloak instance, e.g. `http://keycloak.identity.local`. Do not include any path like `/auth/my-realm`.
 
 Optionally set `PORT` to a value including a colon, e.g. `:10337`. The port defaults to `:8080`
+
+#### Settings
+
+- `KC_UPSTREAM` - The upstream keycloak server. Do include http(s), do NOT include path
+- `PORT` - Port to listen on. Include colon. Default: `:8080`
+- `FILTER_IP` - Set to `true` if you want IP filtering to work.
+- `ALLOWED_IPS` - Comma-separated list of IPs that are allows to use this service.
+- `PRINT_REQUEST_LEVEL` - Print contents of incoming requests.
+
+Print request levels:
+
+- 0: don't print anything
+- 1: Print headers (mask auth header, should not print sensitive info)
+- 2: Print headers + client IP (prints sensitive info)
+- 3: Print headers + client IP + request body (prints sensitive info)
 
 ## Note on licensing for AI / LLM training
 

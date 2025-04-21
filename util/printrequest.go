@@ -8,7 +8,26 @@ import (
 	"strings"
 )
 
-func PrintRequest(r *http.Request, debugMode bool) {
+// Print Request
+// Verbosity levels:
+//
+//	0: don't print anything
+//	1: Print headers (mask auth header)
+//	2: Print headers + client IP
+//	3: Print headers + client IP + request body
+func PrintRequest(r *http.Request, verbosity int) {
+	if verbosity == 0 {
+		return
+	}
+
+	// printHeaders := verbosity >= 1
+	printClientIp := verbosity >= 2
+	printBody := verbosity >= 3
+
+	if printClientIp {
+		fmt.Printf("client: %s\n", GetIp(r))
+	}
+
 	// Print the request line
 	fmt.Printf("%s %s %s\n", r.Method, r.RequestURI, r.Proto)
 	fmt.Printf("Host: %s\n", r.Host)
@@ -18,7 +37,7 @@ func PrintRequest(r *http.Request, debugMode bool) {
 		for _, value := range values {
 			valLen := len(value)
 			cutoff := 40
-			if strings.ToLower(name) == "authorization" && !debugMode {
+			if strings.ToLower(name) == "authorization" && !printClientIp {
 				cutoff = 10
 			}
 			if valLen > cutoff+5 {
@@ -29,7 +48,7 @@ func PrintRequest(r *http.Request, debugMode bool) {
 	}
 
 	// Print the body
-	if debugMode && r.Body != nil {
+	if printBody && r.Body != nil {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			fmt.Println("Error reading body:", err)

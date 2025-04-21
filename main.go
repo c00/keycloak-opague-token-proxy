@@ -4,14 +4,47 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/c00/keycloak-opague-token-proxy/util"
 	"github.com/spf13/viper"
 )
+
+type Middleware func(http.Handler) http.Handler
+
+// Apply the middlewares in order
+func chainMiddlewares(h http.Handler, middlewares []Middleware) http.Handler {
+	for _, m := range middlewares {
+		h = m(h)
+	}
+	return h
+}
+
+func PrintRequestMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		util.PrintRequest(r, printLevel)
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+func filterIpMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ip := util.GetIp(r)
+		if !slices.Contains(allowedIps, ip) {
+			slog.Info("[filterip] unauthorized IP", "ip", ip, "allowed", allowedIps)
+			returnHttpError(r, w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
 
 type CachedToken struct {
 	accessToken string
@@ -23,7 +56,9 @@ var tokens util.SimpleKeyValueStore[CachedToken]
 
 var forwardTo string
 var listenPort string
-var debug bool
+var filterIps bool
+var allowedIps []string
+var printLevel int
 
 func main() {
 	tokens = util.NewSimpleKeyValueStore[CachedToken]()
@@ -38,19 +73,39 @@ func main() {
 	forwardTo = viper.GetString("KC_UPSTREAM")
 	viper.SetDefault("PORT", ":8080")
 	listenPort = viper.GetString("PORT")
-	viper.SetDefault("DEBUG", false)
-	debug = viper.GetBool("DEBUG")
+
+	viper.SetDefault("FILTER_IP", false)
+	filterIps = viper.GetBool("FILTER_IP")
+	viper.SetDefault("ALLOWED_IPS", []string{})
+	allowedIps = util.SplitString(viper.GetString("ALLOWED_IPS"))
+
+	viper.SetDefault("PRINT_REQUEST_LEVEL", 0)
+	printLevel = viper.GetInt("PRINT_REQUEST_LEVEL")
 
 	go cleanup()
 
-	fmt.Printf("Listening on: http://localhost%v\n\n", listenPort)
-	http.HandleFunc("/", handler)
+	//setup middlewares
+	middlewares := []Middleware{}
+	if filterIps {
+		if len(allowedIps) == 0 {
+			slog.Error("filterIps is set to true, but allowedIps is empty.")
+			panic("filterIps is set to true, but allowedIps is empty.")
+		}
+		middlewares = append(middlewares, filterIpMiddleware)
+	}
+
+	if printLevel > 0 {
+		middlewares = append(middlewares, PrintRequestMiddleware)
+	}
+
+	//Start listening
+	slog.Info("Starting server", "port", listenPort)
+	http.Handle("/", chainMiddlewares(http.HandlerFunc(handler), middlewares))
 	http.ListenAndServe(listenPort, nil)
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
-
-	util.PrintRequest(r, debug)
+	// util.PrintRequest(r, debug)
 	expectToken := false
 
 	//Detect if there is an auth token
@@ -58,8 +113,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	if header != "" {
 		parts := strings.Split(header, " ")
 		if len(parts) != 2 {
-			fmt.Printf("malformed auth header: %v", header)
-			http.Error(w, "Malformed Auth Header", http.StatusBadRequest)
+			slog.Error("malformed auth header", "header", header)
+			returnHttpError(r, w, "Malformed Auth Header", http.StatusBadRequest)
 			return
 		}
 
@@ -75,7 +130,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 				token.expires = time.Now().Add(time.Hour)
 				tokens.Set(parts[1], token)
 			} else {
-				fmt.Println("got auth header, but no matching tokens")
+				slog.Error("got auth header, but no matching tokens")
 			}
 		}
 	}
@@ -84,8 +139,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	client := &http.Client{}
 	req, err := http.NewRequest(r.Method, forwardTo+r.RequestURI, r.Body)
 	if err != nil {
-		fmt.Printf("cannot create request: %v", err)
-		http.Error(w, "Request creation failed", http.StatusInternalServerError)
+		slog.Error("cannot create request", "error", err)
+		returnHttpError(r, w, "Request creation failed", http.StatusInternalServerError)
 		return
 	}
 
@@ -95,8 +150,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// Forward the request and response
 	resp, err := client.Do(req)
 	if err != nil {
-		fmt.Printf("cannot forward request: %v", err)
-		http.Error(w, "Request forwarding failed", http.StatusInternalServerError)
+		slog.Error("cannot forward request", "error", err)
+		returnHttpError(r, w, "Request forwarding failed", http.StatusInternalServerError)
 		return
 	}
 	defer resp.Body.Close()
@@ -107,31 +162,31 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	if expectToken {
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
-			fmt.Println("Error reading body:", err)
-			http.Error(w, "Request forwarding failed", http.StatusInternalServerError)
+			slog.Error("Error reading body", "error", err)
+			returnHttpError(r, w, "Request forwarding failed", http.StatusInternalServerError)
 			return
 		}
 
 		var tokenResponse map[string]any
 		err = json.Unmarshal(body, &tokenResponse)
 		if err != nil {
-			fmt.Printf("cannot unmarshall: %v\n", err)
-			http.Error(w, "Request forwarding failed", http.StatusInternalServerError)
+			slog.Error("cannot unmarshall", "error", err)
+			returnHttpError(r, w, "Request forwarding failed", http.StatusInternalServerError)
 			return
 		}
 
 		accessToken, ok := tokenResponse["access_token"].(string)
 		if !ok {
-			fmt.Printf("could not get access token from response: %+v\n", tokenResponse)
-			http.Error(w, "Request forwarding failed", http.StatusInternalServerError)
+			slog.Error("could not get access token from response", "response", tokenResponse)
+			returnHttpError(r, w, "Request forwarding failed", http.StatusInternalServerError)
 			return
 		}
 
 		//generate a nice opague token
 		opague, err := util.GetOpagueToken(32)
 		if err != nil {
-			fmt.Printf("cannot get opague token: %v\n", err)
-			http.Error(w, "Request forwarding failed", http.StatusInternalServerError)
+			slog.Error("cannot get opague token", "error", err)
+			returnHttpError(r, w, "Request forwarding failed", http.StatusInternalServerError)
 			return
 		}
 		tokens.Set(opague, CachedToken{
@@ -139,14 +194,13 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			expires:     time.Now().Add(time.Hour),
 		})
 		tokenResponse["access_token"] = opague
-		fmt.Println("Stored access token", opague)
 
-		w.WriteHeader(resp.StatusCode)
+		setStatus(r, w, resp.StatusCode)
 
 		byteRes, err := json.Marshal(tokenResponse)
 		if err != nil {
-			fmt.Printf("cannot marshall tokenresponse: %v\n", err)
-			http.Error(w, "cannot marshall tokenresponse", http.StatusInternalServerError)
+			slog.Error("cannot marshall tokenresponse", "error", err)
+			returnHttpError(r, w, "cannot marshall tokenresponse", http.StatusInternalServerError)
 			return
 		}
 
@@ -155,7 +209,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Set the status code
-	w.WriteHeader(resp.StatusCode)
+	setStatus(r, w, resp.StatusCode)
 
 	io.Copy(w, resp.Body)
 }
@@ -172,4 +226,14 @@ func cleanup() {
 
 		time.Sleep(time.Hour)
 	}
+}
+
+func setStatus(r *http.Request, w http.ResponseWriter, status int) {
+	slog.Info("request ok", "method", r.Method, "path", r.URL.Path, "status", status)
+	w.WriteHeader(status)
+}
+
+func returnHttpError(r *http.Request, w http.ResponseWriter, msg string, status int) {
+	slog.Info("request failed", "method", r.Method, "path", r.URL.Path, "status", status)
+	http.Error(w, msg, status)
 }
