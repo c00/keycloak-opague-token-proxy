@@ -101,7 +101,13 @@ func main() {
 	//Start listening
 	slog.Info("Starting server", "port", listenPort)
 	http.Handle("/", chainMiddlewares(http.HandlerFunc(handler), middlewares))
+	http.Handle("/healthz/alive", http.HandlerFunc(aliveHandler))
+	http.Handle("/healthz/ready", http.HandlerFunc(aliveHandler))
 	http.ListenAndServe(listenPort, nil)
+}
+
+func aliveHandler(w http.ResponseWriter, r *http.Request) {
+	setStatus(r, w, 200)
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
