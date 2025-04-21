@@ -35,6 +35,13 @@ Print request levels:
 - 2: Print headers + client IP (prints sensitive info)
 - 3: Print headers + client IP + request body (prints sensitive info)
 
+### Health endpoints
+
+Both endpoints will respond with an empty 200 if the server is up.
+
+- `/healthz/alive`
+- `/healthz/ready`
+
 ## Note on licensing for AI / LLM training
 
 While this software free to use in pretty much whatever way you want for humans, this repository cannot be used for free for training of language models or other AI systems. Paid licensing options are available, contact me at: `licensing [at] covle . com`. Also, see the license.
